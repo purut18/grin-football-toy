@@ -1,0 +1,27 @@
+# ==============================================================================
+# app.yaml — GRIN Football Goalkeeper AI Configuration
+# ==============================================================================
+#
+# This configuration file defines the metadata and system properties for the
+# GRIN Football Goalkeeper AI App within the Arduino App Lab environment.
+# It is parsed by the App Lab manager to register, categorize, and represent the
+# application in the dashboard and user interface.
+#
+# Technical Specifications:
+#   - Name: GRIN Football Goalkeeper AI
+#   - Icon: ⚽ (Soccer Ball emoji)
+#   - Exposed Ports: None (no web/network service exposed directly)
+#   - Bricks: None (uses raw GPIO and RPC bridge)
+# ==============================================================================
+
+# The user-visible name of the application displayed in the App Lab UI.
+name: GRIN Football Goalkeeper AI
+
+# The graphical icon represented in the app tile, usually an emoji or character.
+icon: ⚽
+
+# Network port bindings exposed by this application daemon to the network.
+ports: []
+
+# Microprocessor/Microcontroller hardware abstraction bricks used by the app.
+bricks: []

@@ -1,0 +1,18 @@
+# clangd configuration file for the GRIN Football Toy project
+# -----------------------------------------------------------
+# This file instructs the clangd language server on how to interpret
+# compiler commands and file types in this project.
+#
+# Rule 1: Compile .ino files as standard C++
+# Since Arduino (.ino) files are pre-processed by the Arduino toolchain before
+# compilation, standard clangd doesn't know their language type. We force them
+# to be treated as C++ source files (-x c++) using the C++17 standard.
+#
+# Rule 2: Suppress unknown compiler flags
+# We filter out compiler arguments that clang doesn't recognize to avoid errors.
+
+If:
+  PathMatch: .*\.ino
+
+CompileFlags:
+  Add: [-x, c++, -std=c++17]

@@ -1,0 +1,27 @@
+# ==============================================================================
+# app.yaml — IR Tracker Sensor Test App Configuration
+# ==============================================================================
+#
+# This configuration file defines the metadata and system properties for the
+# IR Tracker Sensor Test App within the Arduino App Lab environment.
+# It is parsed by the App Lab manager to register, categorize, and represent the
+# application in the dashboard and user interface.
+#
+# Technical Specifications:
+#   - Name: IR Tracker Test
+#   - Icon: 🔍 (Magnifying Glass emoji)
+#   - Exposed Ports: None
+#   - Bricks: None
+# ==============================================================================
+
+# The user-visible name of the application displayed in the App Lab UI.
+name: IR Tracker Test
+
+# The graphical icon represented in the app tile, usually an emoji or character.
+icon: 🔍
+
+# Network port bindings exposed by this application daemon to the network.
+ports: []
+
+# Microprocessor/Microcontroller hardware abstraction bricks used by the app.
+bricks: []

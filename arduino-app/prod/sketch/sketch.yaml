@@ -1,0 +1,18 @@
+# ==============================================================================
+# sketch.yaml — Arduino Uno Q Sketch Build Configuration (Production App)
+# ==============================================================================
+#
+# This file defines the platform configuration and libraries required to compile
+# and upload the sketch to the STM32U585 MCU on the Arduino Uno Q. It is read
+# by the arduino-cli toolchain inside the App Lab environment.
+#
+# Technical Specifications:
+#   - Platform: arduino:zephyr
+#   - Build Profile: default
+# ==============================================================================
+
+profiles:
+  default:
+    platforms:
+      - platform: arduino:zephyr
+default_profile: default
