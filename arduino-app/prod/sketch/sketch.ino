@@ -53,29 +53,42 @@
 // HARDWARE CONFIGURATION CONSTANTS
 // ==============================================================================
 
-// Total number of IR sensor modules connected to the system.
-const int NUM_SENSORS = 2;
+// Total number of physical IR sensor modules integrated into the hardware assembly.
+// Updated to 3 to support the newly added sensor row placed behind the goalkeeper.
+// Technically, each sensor module acts as a sub-array of phototransistor components.
+const int NUM_SENSORS = 3;
 
-// Number of individual IR channels per sensor module.
+// Number of individual IR reflection photodiode/phototransistor channels per sensor module.
+// The TCRT5000-based Smartelex modules contain exactly 5 discrete emitter-receiver pairs.
 const int CHANNELS_PER_SENSOR = 5;
 
-// Total number of analog channels routed through the MUX.
+// Total quantity of analog signal channels connected to the multiplexer input lines.
+// Mathematically, this is the product of the number of sensor modules (3) and the channels per module (5).
+// 3 sensors * 5 channels = 15 total channels multiplexed via time-division into a single analog pin.
 const int TOTAL_CHANNELS = NUM_SENSORS * CHANNELS_PER_SENSOR;
 
-// Digital pin assignments for the MUX address lines.
-// We use the board pin macros D2, D3, D6, D7 to avoid CAN Bus conflict on D4/D5.
-const int MUX_S0_PIN = D2;  // Address bit 0 (least significant bit)
-const int MUX_S1_PIN = D3;  // Address bit 1
-const int MUX_S2_PIN = D6;  // Address bit 2 [Moved from D4]
-const int MUX_S3_PIN = D7;  // Address bit 3 (most significant bit) [Moved from D5]
+// Digital pin assignments for the MUX address lines (S0-S3).
+// We use board-specific pin macros (D2, D3, D6, D7) rather than raw register numbers or hardware GPIO IDs
+// to comply with the board layout and to avoid resource conflicts with the FDCAN1 CAN Bus peripheral 
+// mapped by default to D4 and D5 in the Zephyr RTOS device tree configuration.
+const int MUX_S0_PIN = D2;  // Address bit 0 (least significant bit, LSB) for 4-bit binary channel selection
+const int MUX_S1_PIN = D3;  // Address bit 1 for 4-bit binary channel selection
+const int MUX_S2_PIN = D6;  // Address bit 2 (shifted from D4 to prevent FDCAN1 transmit pin conflicts)
+const int MUX_S3_PIN = D7;  // Address bit 3 (most significant bit, MSB, shifted from D5 to prevent FDCAN1 receive pin conflicts)
 
-// Analog pin connected to the MUX's common SIG (signal) output.
+// Analog pin configured to receive the common multiplexed signal output (SIG) of the CD74HC4067.
+// The selected multiplexer channel's voltage level is electrically connected to A0 for ADC sampling.
 const int MUX_SIG_PIN = A0;
 
-// MUX channel-to-sensor mapping table.
+// MUX channel-to-sensor routing mapping table.
+// Maps each logical sensor index and channel index to a physical multiplexer input port (C0 to C14).
+// C0-C4 route Sensor 1 (front-most row).
+// C5-C9 route Sensor 2 (mid row).
+// C10-C14 route Sensor 3 (rear-most row, situated behind the goalkeeper for goal detection).
 const int MUX_CHANNEL_MAP[NUM_SENSORS][CHANNELS_PER_SENSOR] = {
-  {0, 1, 2, 3, 4},   // Sensor 1: MUX channels C0–C4
-  {5, 6, 7, 8, 9}    // Sensor 2: MUX channels C5–C9
+  {0, 1, 2, 3, 4},     // Sensor 1: MUX channels C0–C4
+  {5, 6, 7, 8, 9},     // Sensor 2: MUX channels C5–C9
+  {10, 11, 12, 13, 14} // Sensor 3: MUX channels C10–C14
 };
 
 // ==============================================================================
@@ -179,12 +192,21 @@ public:
 // GLOBAL INSTANCES
 // ==============================================================================
 
+// Instantiate the global multiplexer hardware abstraction layer.
+// Passed with the digital control pins (S0-S3) and the common analog signal line (SIG) on A0.
+// This instance manages the low-level digital write operations and transient settling delays.
 CD74HC4067Mux mux(MUX_S0_PIN, MUX_S1_PIN, MUX_S2_PIN, MUX_S3_PIN, MUX_SIG_PIN);
 
-MuxAnalogTracker tracker1(&mux, MUX_CHANNEL_MAP[0]);
-MuxAnalogTracker tracker2(&mux, MUX_CHANNEL_MAP[1]);
+// Instantiate MuxAnalogTracker wrappers for each of the three physical sensor rows.
+// Each tracker is bound to the shared multiplexer controller and receives its respective channel configuration
+// from the MUX_CHANNEL_MAP. This isolates the ADC read logic from the signal processing math.
+MuxAnalogTracker tracker1(&mux, MUX_CHANNEL_MAP[0]); // Sensor Row 1 (Entry row)
+MuxAnalogTracker tracker2(&mux, MUX_CHANNEL_MAP[1]); // Sensor Row 2 (Middle row)
+MuxAnalogTracker tracker3(&mux, MUX_CHANNEL_MAP[2]); // Sensor Row 3 (Goal row behind keeper)
 
-MuxAnalogTracker* trackers[NUM_SENSORS] = {&tracker1, &tracker2};
+// Declare the array of tracker pointers to allow clean loop-based iteration during sampling.
+// Dimensioned dynamically by NUM_SENSORS (3) to prevent buffer overflows or compilation bounds errors.
+MuxAnalogTracker* trackers[NUM_SENSORS] = {&tracker1, &tracker2, &tracker3};
 
 // ==============================================================================
 // ADAPTIVE THRESHOLDING & SIGNAL PROCESSING STATE ARRAYS
@@ -214,23 +236,56 @@ int dynamicReleaseThresholds[NUM_SENSORS][CHANNELS_PER_SENSOR];
 
 bool sensorsTriggeredInEvent[NUM_SENSORS][CHANNELS_PER_SENSOR];
 
-unsigned long lastEventPrintTime = 0;
-const unsigned long EVENT_COOLDOWN_MS = 500;
+// ==============================================================================
+// STATE MACHINE CONFIGURATION
+// ==============================================================================
 
-// Event accumulation state. When a trigger is first detected, we accumulate
-// triggers for a small window (150ms) to allow the ball to roll across both
-// sensor rows before printing a combined event vector.
-bool isAccumulatingEvent = false;
-unsigned long eventAccumulationStartTime = 0;
-const unsigned long EVENT_ACCUMULATION_MS = 150;
+// Enumeration representing the operational states of the ball-tracking state machine.
+// STATE_WAITING_FOR_SHOT: The system is idle, scanning for a rising edge trigger on Sensor 1 or Sensor 2.
+// STATE_WAITING_FOR_GOAL: A shot is in progress. The system accumulates triggers and watches Sensor 3 (goal line).
+// STATE_COOLDOWN: A shot has finalized. The system ignores inputs for 2 seconds to allow the field to clear.
+enum SystemState {
+  STATE_WAITING_FOR_SHOT,
+  STATE_WAITING_FOR_GOAL,
+  STATE_COOLDOWN
+};
+
+// Global control variables for orchestrating state transitions and event aggregation windows.
+SystemState currentState = STATE_WAITING_FOR_SHOT;
+unsigned long shotStartTime = 0;      // System millisecond timestamp when the shot was initiated.
+unsigned long goalTriggerTime = 0;    // System millisecond timestamp when the goal line (Sensor 3) first triggered.
+bool goalDetected = false;            // Latched boolean flag denoting whether Sensor 3 was activated during the shot.
+unsigned long cooldownStartTime = 0;  // System millisecond timestamp when the post-shot cooldown period commenced.
+
+// Timestamp tracker (in milliseconds) for when each of the NUM_SENSORS rows is first activated.
+// Used to compute relative trigger timing (T+X ms) relative to the initial shot trigger.
+// This is required to capture the speed/timing dynamics of the ball's movement across the rows.
+unsigned long sensorRowFirstTriggerTime[NUM_SENSORS];
+
+// Timeouts and settling windows (in milliseconds) used to govern state transition logic.
+const unsigned long SHOT_TIMEOUT_MS = 1500;  // Maximum duration to wait for a goal trigger before declaring a miss/save.
+const unsigned long GOAL_SETTLE_MS = 80;     // Settling period after goal trigger to capture the full crossing profile.
+const unsigned long COOLDOWN_MS = 2000;      // Hard post-shot system lockout duration (2.0 seconds) to reset and wait for next play.
 
 // ==============================================================================
 // INITIALIZATION HELPER FUNCTIONS
 // ==============================================================================
 
+// initializeStateArrays — Resets all state tracking variables, filters, and baselines to clean initial values.
+// Called during setup() to bootstrap the system, and can be invoked dynamically for hot-resets.
 void initializeStateArrays() {
-  isAccumulatingEvent = false;
-  eventAccumulationStartTime = 0;
+  currentState = STATE_WAITING_FOR_SHOT;
+  shotStartTime = 0;
+  goalTriggerTime = 0;
+  goalDetected = false;
+  cooldownStartTime = 0;
+  
+  // Initialize the first trigger timestamp array for each sensor row to 0 (untriggered).
+  // This resets timing tracking for all sensors before a new shot event begins.
+  for (int s = 0; s < NUM_SENSORS; s++) {
+    sensorRowFirstTriggerTime[s] = 0;
+  }
+  
   for (int s = 0; s < NUM_SENSORS; s++) {
     for (int c = 0; c < CHANNELS_PER_SENSOR; c++) {
       calibrationBaseline[s][c] = 0;
@@ -312,8 +367,10 @@ void setup() {
     Serial.println();
   }
 
+  // Output diagnostic details to Serial console for operational verification of the hardware setup.
+  // These lines detail the multiplexer and pin routing mapping for operators troubleshooting connection issues.
   Serial.println("=====================================================");
-  Serial.println("  PRODUCTION DUAL IR TRACKER via CD74HC4067 MUX");
+  Serial.println("  PRODUCTION TRIPLE IR TRACKER via CD74HC4067 MUX");
   Serial.println("=====================================================");
   Serial.println("MUX Wiring (CD74HC4067 -> Arduino UNO Q):");
   Serial.println("  VCC (Power)    -> 3.3V Pin");
@@ -327,6 +384,7 @@ void setup() {
   Serial.println("-----------------------------------------------------");
   Serial.println("Sensor 1 -> MUX: IR1=C0 IR2=C1 IR3=C2 IR4=C3 IR5=C4");
   Serial.println("Sensor 2 -> MUX: IR1=C5 IR2=C6 IR3=C7 IR4=C8 IR5=C9");
+  Serial.println("Sensor 3 -> MUX: IR1=C10 IR2=C11 IR3=C12 IR4=C13 IR5=C14");
   Serial.println("=====================================================");
 }
 
@@ -395,62 +453,141 @@ void loop() {
     }
   }
 
-  // PHASE 2: EVENT ACCUMULATION & AGGREGATION (ACROSS DUAL SENSOR ROWS)
-  // To correctly capture ball transits that span both physical sensor rows,
-  // we do not print immediately. Instead, when a trigger first occurs, we start
-  // a 150ms accumulation window. All triggers from both sensors during this window
-  // are consolidated into a single combined output vector.
-  if (millis() - lastEventPrintTime > EVENT_COOLDOWN_MS) {
-    for (int s = 0; s < NUM_SENSORS; s++) {
-      for (int c = 0; c < CHANNELS_PER_SENSOR; c++) {
-        if (currentTriggerState[s][c]) {
-          // If a new rising edge is detected, begin/extend trigger logging
-          if (!prevTriggerState[s][c]) {
-            triggerStartTime[s][c] = millis();
-            if (!isAccumulatingEvent) {
-              isAccumulatingEvent = true;
-              eventAccumulationStartTime = millis();
+  // ============================================================================
+  // PHASE 2: SHOT DETECTION & GOAL EVALUATION STATE MACHINE
+  // ============================================================================
+  // The system uses a state machine to track the ball's transition across the pitch:
+  // 1. STATE_WAITING_FOR_SHOT: Waits for a rising-edge trigger on Sensor 1 and/or 2.
+  // 2. STATE_WAITING_FOR_GOAL: Shot is active. Wait for Sensor 3 trigger (goal) or timeout.
+  // 3. STATE_COOLDOWN: Lock system for 2 seconds to allow ball clear, maintaining baseline calibration.
+  switch (currentState) {
+    
+    case STATE_WAITING_FOR_SHOT: {
+      bool shotDetected = false;
+      // Loop through the front two sensors (Sensor 1 and Sensor 2) to detect ball entry.
+      for (int s = 0; s < 2; s++) {
+        for (int c = 0; c < CHANNELS_PER_SENSOR; c++) {
+          // Detect shot starting on a clean rising edge (untriggered to triggered state transition)
+          if (currentTriggerState[s][c] && !prevTriggerState[s][c]) {
+            sensorsTriggeredInEvent[s][c] = true;
+            shotDetected = true;
+          }
+        }
+      }
+      
+      // If a rising edge occurred on Sensor 1 or Sensor 2, start the shot tracking window
+      if (shotDetected) {
+        currentState = STATE_WAITING_FOR_GOAL;
+        shotStartTime = millis();
+        goalDetected = false;
+        
+        // Set the first trigger timestamp (T+0ms) for the row(s) that initiated the shot.
+        // This marks the baseline time reference (T=0) for relative speed tracking.
+        for (int s = 0; s < 2; s++) {
+          for (int c = 0; c < CHANNELS_PER_SENSOR; c++) {
+            if (sensorsTriggeredInEvent[s][c]) {
+              sensorRowFirstTriggerTime[s] = shotStartTime;
+              break; // Set once per row
             }
           }
-
-          // If we are currently accumulating an event, capture this channel trigger
-          if (isAccumulatingEvent) {
+        }
+        
+        Serial.println(">>> Shot detected! Waiting for goal evaluation...");
+      }
+      break;
+    }
+    
+    case STATE_WAITING_FOR_GOAL: {
+      // Accumulate all active channel triggers on Sensor 1, Sensor 2, and Sensor 3 during shot window.
+      // We check absolute currentTriggerState so that triggers at any point during the window are latched.
+      for (int s = 0; s < NUM_SENSORS; s++) {
+        bool rowTriggeredThisIteration = false;
+        for (int c = 0; c < CHANNELS_PER_SENSOR; c++) {
+          if (currentTriggerState[s][c]) {
             sensorsTriggeredInEvent[s][c] = true;
+            rowTriggeredThisIteration = true;
+          }
+        }
+        
+        // If this sensor row registered an active trigger during this iteration and its 
+        // first trigger timestamp is still unset (0), record the current system time.
+        // This captures the exact time the ball arrived at this physical row.
+        if (rowTriggeredThisIteration && sensorRowFirstTriggerTime[s] == 0) {
+          sensorRowFirstTriggerTime[s] = millis();
+        }
+      }
+      
+      // Look for the goal line (Sensor 3) first trigger event if not already detected
+      if (!goalDetected) {
+        for (int c = 0; c < CHANNELS_PER_SENSOR; c++) {
+          if (currentTriggerState[2][c]) {
+            goalDetected = true;
+            // Align goalTriggerTime with the first trigger time of Sensor 3 recorded above.
+            goalTriggerTime = sensorRowFirstTriggerTime[2];
+            Serial.println(">>> Goal sensor activated! Settling...");
+            break;
           }
         }
       }
-    }
-
-    // Check if the accumulation window has closed (150ms elapsed since the first trigger)
-    if (isAccumulatingEvent && (millis() - eventAccumulationStartTime >= EVENT_ACCUMULATION_MS)) {
-      Serial.print("[[");
-      // Output consolidated Sensor 1 triggers
-      for (int c = 0; c < CHANNELS_PER_SENSOR; c++) {
-        Serial.print(sensorsTriggeredInEvent[0][c] ? "1" : "0");
-        if (c < CHANNELS_PER_SENSOR - 1) Serial.print(",");
-        sensorsTriggeredInEvent[0][c] = false; // Reset for next event
+      
+      // Check if we should finalize the current shot event and output results:
+      // - If goal line (Sensor 3) triggered: wait GOAL_SETTLE_MS (80ms) to capture full transit width.
+      // - If goal line did not trigger: wait for SHOT_TIMEOUT_MS (1500ms) to elapse.
+      bool finalizeShot = false;
+      if (goalDetected && (millis() - goalTriggerTime >= GOAL_SETTLE_MS)) {
+        finalizeShot = true;
+      } else if (millis() - shotStartTime >= SHOT_TIMEOUT_MS) {
+        finalizeShot = true;
       }
-      Serial.print("],[");
-      // Output consolidated Sensor 2 triggers
-      for (int c = 0; c < CHANNELS_PER_SENSOR; c++) {
-        Serial.print(sensorsTriggeredInEvent[1][c] ? "1" : "0");
-        if (c < CHANNELS_PER_SENSOR - 1) Serial.print(",");
-        sensorsTriggeredInEvent[1][c] = false; // Reset for next event
-      }
-      Serial.println("]]");
-
-      // Reset accumulation flag and engage the 500ms post-event cooldown
-      isAccumulatingEvent = false;
-      lastEventPrintTime = millis();
-    }
-  } else {
-    // During post-event cooldown, still record trigger timestamps for adaptive baseline calculation.
-    for (int s = 0; s < NUM_SENSORS; s++) {
-      for (int c = 0; c < CHANNELS_PER_SENSOR; c++) {
-        if (currentTriggerState[s][c] && !prevTriggerState[s][c]) {
-          triggerStartTime[s][c] = millis();
+      
+      if (finalizeShot) {
+        // Output consolidated event state with relative trigger timestamps for each sensor row.
+        // Format matches: Sx (T+XXms): [c0,c1,c2,c3,c4] or Sx (N/A): [0,0,0,0,0] if not crossed.
+        for (int s = 0; s < NUM_SENSORS; s++) {
+          Serial.print("S");
+          Serial.print(s + 1);
+          if (sensorRowFirstTriggerTime[s] > 0) {
+            // Compute relative trigger offset in milliseconds
+            unsigned long relTime = sensorRowFirstTriggerTime[s] - shotStartTime;
+            Serial.print(" (T+");
+            Serial.print(relTime);
+            Serial.print("ms): [");
+          } else {
+            Serial.print(" (N/A): [");
+          }
+          
+          for (int c = 0; c < CHANNELS_PER_SENSOR; c++) {
+            Serial.print(sensorsTriggeredInEvent[s][c] ? "1" : "0");
+            if (c < CHANNELS_PER_SENSOR - 1) {
+              Serial.print(",");
+            }
+          }
+          Serial.println("]");
         }
+        
+        // Enter cooldown period to block subsequent triggers and let ball roll clear of sensors
+        currentState = STATE_COOLDOWN;
+        cooldownStartTime = millis();
+        Serial.println(">>> Shot finalized. Entering 2-second cooldown...");
       }
+      break;
+    }
+    
+    case STATE_COOLDOWN: {
+      // During cooldown, do not start new shots or aggregate events.
+      // Once the cooldown period (2.0s) has elapsed, clear event triggers and return to idle.
+      if (millis() - cooldownStartTime >= COOLDOWN_MS) {
+        // Reset the event triggers array and timestamps to prepare for next shot
+        for (int s = 0; s < NUM_SENSORS; s++) {
+          sensorRowFirstTriggerTime[s] = 0;
+          for (int c = 0; c < CHANNELS_PER_SENSOR; c++) {
+            sensorsTriggeredInEvent[s][c] = false;
+          }
+        }
+        currentState = STATE_WAITING_FOR_SHOT;
+        Serial.println(">>> Cooldown complete. System ready for next shot.");
+      }
+      break;
     }
   }
 
