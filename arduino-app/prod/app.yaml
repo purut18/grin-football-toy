@@ -1,0 +1,32 @@
+# ==============================================================================
+# app.yaml — Production Dual IR Sensor Tracking App Configuration
+# ==============================================================================
+#
+# This configuration file defines the metadata and system properties for the
+# Production Dual IR Sensor Tracking App within the Arduino App Lab environment.
+# It is parsed by the App Lab manager to register, categorize, and represent the
+# application in the dashboard and user interface.
+#
+# Technical Specifications:
+#   - Name: Grin Football Tracker
+#   - Icon: ⚽ (Football emoji)
+#   - Exposed Ports: None
+#   - Bricks: None
+#
+# Hardware Stack:
+#   - 2x Smartelex 5-Channel Tracker Sensors (TCRT5000-based)
+#   - 1x SmartElex CD74HC4067 16-channel analog/digital MUX breakout board
+#   - Arduino Uno Q (STM32U585 MCU)
+# ==============================================================================
+
+# The user-visible name of the application displayed in the App Lab UI.
+name: Grin Football Tracker
+
+# The graphical icon represented in the app tile, usually an emoji or character.
+icon: ⚽
+
+# Network port bindings exposed by this application daemon to the network.
+ports: []
+
+# Microprocessor/Microcontroller hardware abstraction bricks used by the app.
+bricks: []
